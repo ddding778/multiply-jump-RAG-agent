@@ -1,0 +1,2 @@
+直接浏览器访问
+http://localhost:6333/collections/tech_docs

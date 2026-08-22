@@ -1,0 +1,23 @@
+Name: gateway
+Host: 0.0.0.0
+Port: 8888
+Mode: dev
+
+UserRpc:
+  Etcd:
+    Hosts:
+      - 127.0.0.1:2379
+    Key: user.rpc
+
+AiRpc:
+  Etcd:
+    Hosts:
+      - 127.0.0.1:2379
+    Key: ai.rpc
+  Timeout: 30000
+
+JwtAuth:
+  AccessSecret: "your-very-long-secret-key"
+  AccessExpire: 3600
+
+Timeout: 30000

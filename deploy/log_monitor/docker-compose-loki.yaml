@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/config/loki-config.yaml
+    volumes:
+      - ./config/loki-config.yaml:/config/loki-config.yaml
+    networks:
+      - ai-chat-net
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    volumes:
+      - ./config/promtail-config.yaml:/config/promtail-config.yaml
+      - ../../logs:/var/log/ai-chat   # 将宿主机的日志目录挂载到容器内
+    command: -config.file=/config/promtail-config.yaml
+    networks:
+      - ai-chat-net
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - ai-chat-net
+    depends_on:
+      - loki
+
+networks:
+  ai-chat-net:
+    driver: bridge

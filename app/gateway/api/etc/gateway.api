@@ -1,0 +1,44 @@
+syntax = "v1"
+
+info (
+	title:   "网关"
+	desc:    "网关"
+	author:  "dingdingding129"
+	email:   "dingdingding129@qq.com"
+	version: "v1"
+)
+
+import (
+	"gateway/user.api"
+	"gateway/aiApi.api"
+)
+
+@server (
+	prefix: /v1
+	group:  user
+)
+service gateway {
+	@doc "login"
+	@handler Login
+	post /user/login (LoginReq) returns (LoginResp)
+
+	@doc "register"
+	@handler Register
+	post /user/register (RegisterReq) returns (RegisterResp)
+}
+
+@server (
+	prefix: /v1
+	group:  user
+	jwt:    JwtAuth
+)
+service gateway {
+	@doc "get user info"
+	@handler GetUserInfo
+	post /user/info (UserInfoReq) returns (UserInfoResp)
+
+	@doc "chat"
+	@handler Chat
+	post /ai/chat (ChatReq) returns (ChatResp)
+}
+

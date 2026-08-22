@@ -1,0 +1,18 @@
+server:
+  http_listen_port: 9080
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+positions:
+  filename: /tmp/positions.yaml
+
+scrape_configs:
+  - job_name: ai-chat-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: ai-chat
+          env: dev
+          __path__: /var/log/ai-chat/*.log    # 采集宿主机 logs 目录下的所有日志文件

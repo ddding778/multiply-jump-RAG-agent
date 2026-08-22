@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package ai;
+option go_package = "./pb";
+
+// ChatRequest 对话请求
+message ChatRequest {
+    string message = 1; // 用户消息
+    string session_id = 2; // 会话id，用于保存上下文
+    int64 userId = 3; // 用户id
+}
+
+// ChatResponse 对话响应
+message ChatResponse {
+    string reply = 1; // AI回复
+    string session_id = 2; // 会话id，用于保存上下文
+}
+
+
+// DeepSeekResponses DeepSeek API 响应列表(包含多个选择项)
+message DeepSeekResponse {
+    string id = 1;
+    string object = 2;
+    int64 created = 3;
+    string model = 4;
+    repeated Choice choices = 5;
+    Usage usage = 6;
+}
+
+message Choice {
+    int32 index = 1;
+    Message message = 2;
+    string finish_reason = 3;
+}
+
+message Message {
+    string role = 1;
+    string content = 2;
+}
+
+message Usage {
+    int32 prompt_tokens = 1;
+    int32 completion_tokens = 2;
+    int32 total_tokens = 3;
+}
+
+
+// AiRpc 服务定义
+service AiRpc {
+    // Chat 对话接口
+    rpc Chat(ChatRequest) returns (ChatResponse);
+}

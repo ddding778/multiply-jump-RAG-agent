@@ -1,0 +1,21 @@
+Name: user.rpc
+ListenOn: 0.0.0.0:8081
+Mode: dev
+Timeout: 30000
+
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: user.rpc
+
+
+DataSource: "root:123456@tcp(127.0.0.1:3306)/aichat_user_db?charset=utf8mb4&parseTime=true"
+
+CacheRedis:
+  - Host: "127.0.0.1:6379"
+    Pass: ""
+    Type: node
+
+JwtAuth:
+  AccessSecret: "your-very-long-secret-key"
+  AccessExpire: 3600  # 1小时

@@ -1,0 +1,20 @@
+syntax = "v1"
+
+info (
+	title:   "AI接口"
+	desc:    "AI聊天接口"
+	author:  "dingdingding129"
+	email:   "dingdingding129@qq.com"
+	version: "v1"
+)
+
+// AI 聊天请求/响应
+type ChatReq {
+    Message   string `json:"message"`
+	SessionId string `json:"session_id"`
+}
+
+type ChatResp {
+    Reply     string `json:"reply"`
+    SessionId string `json:"session_id"`
+}

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Chat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #f5f5f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .chat-container {
+            width: 100%;
+            max-width: 800px;
+            height: 80vh;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-header {
+            background-color: #4CAF50;
+            color: white;
+            padding: 20px;
+            border-radius: 10px 10px 0 0;
+            text-align: center;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .message {
+            max-width: 80%;
+            padding: 10px 15px;
+            border-radius: 18px;
+            word-wrap: break-word;
+        }
+
+        .user-message {
+            background-color: #e3f2fd;
+            align-self: flex-end;
+            border-bottom-right-radius: 5px;
+        }
+
+        .ai-message {
+            background-color: #f1f1f1;
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+        }
+
+        .chat-input {
+            padding: 20px;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-input input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #e0e0e0;
+            border-radius: 20px;
+            font-size: 16px;
+        }
+
+        .chat-input button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 0 20px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        .chat-input button:hover {
+            background-color: #45a049;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(0, 0, 0, 0.1);
+            border-radius: 50%;
+            border-top-color: #4CAF50;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h2>AI Chat</h2>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+            <!-- 消息将在这里显示 -->
+        </div>
+        <div class="chat-input">
+            <input type="text" id="messageInput" placeholder="输入消息..." />
+            <button id="sendButton">发送</button>
+        </div>
+    </div>
+
+    <script>
+        let sessionId = '';
+
+        // 发送消息
+        async function sendMessage() {
+            const messageInput = document.getElementById('messageInput');
+            const message = messageInput.value.trim();
+            
+            if (!message) return;
+
+            // 添加用户消息到聊天界面
+            addMessage('user', message);
+            messageInput.value = '';
+
+            // 显示AI正在输入
+            const aiMessageElement = addMessage('ai', '');
+            const loadingElement = document.createElement('div');
+            loadingElement.className = 'loading';
+            aiMessageElement.appendChild(loadingElement);
+
+            try {
+                const accessToken = sessionStorage.getItem('accessToken');
+                if (!accessToken) {
+                    throw new Error('缺少登录凭证，请先通过登录接口获取并写入 sessionStorage。');
+                }
+
+                // 调用后端API
+                const response = await fetch('http://localhost:8888/v1/ai/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + accessToken
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('API请求失败');
+                }
+
+                // 移除加载动画
+                loadingElement.remove();
+
+                // 处理JSON响应
+                const data = await response.json();
+                aiMessageElement.textContent = data.reply;
+                
+                // 更新sessionId
+                if (data.session_id) {
+                    sessionId = data.session_id;
+                }
+                
+                // 滚动到底部
+                document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
+
+            } catch (error) {
+                console.error('错误:', error);
+                loadingElement.remove();
+                aiMessageElement.textContent = '发生错误，请稍后重试';
+            }
+        }
+
+        // 添加消息到聊天界面
+        function addMessage(type, content) {
+            const chatMessages = document.getElementById('chatMessages');
+            const messageElement = document.createElement('div');
+            messageElement.className = `message ${type}-message`;
+            messageElement.textContent = content;
+            chatMessages.appendChild(messageElement);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            return messageElement;
+        }
+
+        // 事件监听
+        document.getElementById('sendButton').addEventListener('click', sendMessage);
+        document.getElementById('messageInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
