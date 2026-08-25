@@ -104,7 +104,7 @@ flowchart LR
 flowchart LR
     MD["docs/**/*.md 技术文档"] --> SC["标题树 + 段落 + fenced code 状态扫描"]
     SC --> LEAF["叶子 chunk：标题路径 + 相邻段落 + 紧邻代码块"]
-    LEAF --> DENSE["Embedding → Qdrant tech_docs_v2"]
+    LEAF --> DENSE["Embedding → Qdrant tech_docs_v2_<index_version>"]
     LEAF --> BM25["jieba / 标识符拆词 → BM25 索引"]
     Q["技术问题"] --> DQ["Dense Top-N"]
     Q --> BQ["BM25 Top-N"]
@@ -385,7 +385,7 @@ Memory V1 先实现稠密检索、硬过滤、阈值和应用层重排。`MMR` �
 
 ### 10.4 技术文档 RAG 存储、召回与预算
 
-新索引使用 `tech_docs_v2` collection，不覆盖旧 `tech_docs`。Qdrant point payload 至少包括 `document_id`、`section_id`、`chunk_id`、`chunk_order`、`heading_path`、`text`、`line_start`、`line_end`、`previous_chunk_id`、`next_chunk_id`、`content_hash` 和可选 `has_code`。离线索引同时在 `out/rag-index/tech_docs_v2/` 生成已忽略的 `manifest.jsonl` 与 `bm25_index.json`；二者带同一 `index_version`，RAG 服务加载时必须校验与 Qdrant 索引批次一致。
+每个新索引批次使用独立的 `tech_docs_v2_<index_version>` collection，不覆盖旧 `tech_docs`、旧 `tech_docs_v2` 或其他版本 collection。Qdrant point payload 至少包括 `document_id`、`section_id`、`chunk_id`、`chunk_order`、`heading_path`、`text`、`line_start`、`line_end`、`previous_chunk_id`、`next_chunk_id`、`content_hash` 和可选 `has_code`。离线索引同时在 `out/rag-index/tech_docs_v2/<index_version>/` 生成已忽略的 `manifest.jsonl` 与 `bm25_index.json`；二者带同一 `index_version`，RAG 服务加载时必须校验与 Qdrant 索引批次一致。
 
 Dense 召回与 BM25 各取候选，使用 RRF 合并 `chunk_id` 排名，再用 MMR 去除高度重复内容。命中子 chunk 后，只有在参考资料预算仍有余量时，才通过 `section_id` 补充前后相邻 chunk；不能因为命中一个章节就自动注入完整章节。RAG 参考资料最终可以为空。
 

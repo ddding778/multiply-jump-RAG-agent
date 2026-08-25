@@ -1,0 +1,16 @@
+# RAG V2 离线索引和在线检索共用的非敏感配置。
+# 修改 `collection_prefix` 或 `bm25.tokenizer_version` 后需重新构建索引；
+# 仅调整候选数、RRF 或 MMR 参数时，重启 RAG 服务即可。
+collection_prefix: tech_docs_v2
+
+bm25:
+  candidate_top_k: 15
+  tokenizer_version: jieba-identifier-v1
+
+rrf:
+  rank_constant: 20
+  dense_weight: 1.0
+  bm25_weight: 0.005
+
+mmr:
+  lambda: 0.7
