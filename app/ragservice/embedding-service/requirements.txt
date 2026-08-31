@@ -8,3 +8,4 @@ python-dotenv
 PyYAML==6.0.3
 jieba==0.42.1
 rank-bm25==0.2.2
+langfuse==4.15.1

@@ -1,5 +1,5 @@
 # 第一个学习go-zero的项目
-- 参考了采用了looklook的整体架构，开发文档请看docs目录下的开发文档.md。
+- 参考了采用了looklook的整体架构，RAG 开发文档见 [docs/develop/rag链路.md](docs/develop/rag链路.md)。
 - 前端页面还没调试，只是ai做的初版前端
 
 ## AI RPC 本地启动
@@ -32,11 +32,66 @@ go run .\app\ai\rpc\ai.go -f .\app\ai\rpc\etc\ai.yaml
 
 ## RAG V2 离线索引
 
-当前阶段已实现“Markdown 结构化切分 → Qwen embedding → 版本化 Qdrant collection + BM25 artifact → Dense/BM25 → RRF → MMR → P1 上下文扩展”。rerank 与 Langfuse 监控尚未实现。
+当前阶段已实现“Markdown 结构化切分 → Qwen embedding → 版本化 Qdrant collection + BM25 artifact → Dense/BM25 → RRF → MMR → P1 上下文扩展”。rerank 与 RAG V2 `/search` 的 Langfuse 监控尚未实现；OPERA 的独立观测见下文。
+
+## OPERA HotpotQA 离线索引（第一阶段）
 
 ### 输入
 
-- 文档：项目根目录下递归匹配的 `docs/**/*.md`；不会索引 `app/` 源码或 `.txt` 文件。
+- 数据集：本地 `docs/hotpotQA/hotpot_dev_distractor_v1.json`。每个 `context` 元素是一个 paragraph；导入时将标题和完整句子列表作为一个 embedding chunk。
+- 配置：[app/ragservice/config/rag-retrieval.yaml](app/ragservice/config/rag-retrieval.yaml) 的 `opera.retrieval`。它使用独立 collection 前缀 `hotpot_distractor_v1`，不会混用 Markdown RAG V2 的 `tech_docs_v2` collection。
+- 密钥：真实 embedding 仍复用 `.env` 的 `DASHSCOPE_API_KEY`。`--dry-run` 不需要密钥、Qdrant、embedding 或 DeepSeek。
+
+### 输出
+
+- Qdrant：真实运行创建 `hotpot_distractor_v1_<index_version>` 格式的独立 collection；版本值由数据集摘要、paragraph 构建规则、embedding 合同与 BM25 分词规则共同计算。
+- 本地 artifact：`out/opera-index/hotpot_distractor_v1/<index_version>/manifest.jsonl` 与 `bm25_index.json`。后者只分词一次，同时保存全量与 `case_id → chunk_id[]` 映射，运行时支持 `all` 全库 BM25 和 `case` 单题 10 段 BM25。
+
+### 运行
+
+先执行不会产生 API 成本的本地 dry-run：
+
+```powershell
+Set-Location .\app\ragservice\embedding-service
+conda run -n aiChatRAG python -m opera.hotpot_runner --dry-run
+```
+
+确认 manifest 与 BM25 artifact 后，真实 embedding 命令与 V2 相同地读取 `.env` 和 Qdrant：
+
+```powershell
+Set-Location .\app\ragservice\embedding-service
+conda run -n aiChatRAG python -m opera.hotpot_runner
+```
+
+已完成 `POST /opera/ask`、串行 `ExecutionState`、Planner、Analysis-Answer、Rewrite 及 DeepSeek Responses JSON Schema/Pydantic 双校验的本地实现和 mock 测试。OPERA 已接入 Langfuse：每个请求、子 Agent、Hybrid Retriever 和 Responses generation 会形成嵌套 trace；真实 DeepSeek、Qdrant 与 embedding 联调及 OPERA 双组评测仍在后续阶段。
+
+### OPERA Langfuse prompt 与成本观测
+
+#### 输入
+
+- `.env`：`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`LANGFUSE_BASE_URL`。密钥只保留在本地 `.env`，不要写入 YAML、日志或 Git。
+- 配置：[app/ragservice/config/rag-retrieval.yaml](app/ragservice/config/rag-retrieval.yaml) 的 `opera.langfuse`。默认 `enabled: true`、读取 `production` 标签、缓存 300 秒、`capture_input_output: false`。
+- 本地 fallback：`app/ragservice/embedding-service/opera/prompts/*.md`。三份内容均是没有变量的 `text` prompt。
+
+#### 输出
+
+- Langfuse prompt：`opera-planner-system`、`opera-analysis-answer-system`、`opera-rewrite-system` 的 `production` 版本；每次同步会创建同名的新版本。
+- Langfuse trace：`opera-ask` 根 Agent，下含 `opera-planner`、`opera-hybrid-retrieval`、`opera-analysis-answer`、按需的 `opera-rewrite`，以及每次 DeepSeek Responses generation。generation 写入模型名、Schema、prompt 来源/版本、输入/缓存/输出 token 和耗时。
+- 隐私：默认只上传字符数、范围、候选数、token 和错误类型；不上传问题、检索 query、paragraph 正文、模型原始输出或密钥。只有显式将 `capture_input_output` 改为 `true` 才上传原文。
+
+首次或需要将本地修改发布到 Langfuse 时，显式运行同步命令：
+
+```powershell
+Set-Location .\app\ragservice\embedding-service
+conda run -n aiChatRAG python -m opera.prompt_sync
+```
+
+运行服务后，`/opera/ask` 会优先读取对应 `production` prompt；远端不可达、凭据缺失或远端 prompt 无效时会记录不含原文的 `opera_prompt_fallback` 事件并继续使用本地文件。为让 Langfuse 按真实价格自动计算 DeepSeek 成本，需要在 Langfuse 项目中为 YAML 的 `deepseek-chat` 模型配置与 `input`、`cache_read_input_tokens`、`output` 对应的模型价格。
+
+### 输入
+
+- 文档：需要切分和索引的 Markdown 应放在项目根目录 `docs/` 下；离线索引器递归匹配 `docs/**/*.md`。`docs/` 是本地语料目录，当前被 Git 忽略；不会索引 `app/` 源码或 `.txt` 文件。
+- HotpotQA：`docs/hotpotQA/*.json` 是本地多跳 RAG 评测数据，不属于 Markdown 技术文档索引输入；后续由独立的 Hotpot 导入链路读取。
 - embedding：项目根目录未提交的 `.env` 中的 `DASHSCOPE_API_KEY`；旧变量名 `ALIYUN_API_KEY` 仅作兼容回退。
 - 在线版本：`.env` 中必须设置 `RAG_INDEX_VERSION`，其值必须是一次成功 embedding 的 manifest 内 `index_version`。
 - 检索参数：[app/ragservice/config/rag-retrieval.yaml](app/ragservice/config/rag-retrieval.yaml)，不包含密钥。离线构建和在线服务读取同一份文件。
