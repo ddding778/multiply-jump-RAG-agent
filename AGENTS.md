@@ -17,15 +17,16 @@
 
 ## 2. 项目目标与当前边界
 
-这是一个 Go / go-zero 学习项目，当前维护用户认证、旧 Chat 和技术文档 RAG 三条链路。Coding Agent 已迁移到其他项目，本仓库不再承担其设计或实现。
+这是一个 Go / go-zero 学习项目，当前维护用户认证、旧 Chat、技术文档 RAG V2，以及面向面试演示的 OPERA-style Multi-Agent Multi-hop RAG。Coding Agent 已迁移到其他项目，本仓库不再承担其设计或实现。
 
 当前阶段的原则：
 
 - 旧 Chat 是需要维护安全和运行基线的独立链路。
 - 技术文档 RAG 只索引 `docs/**/*.md`，不把项目源码 `app/` 当作检索语料。
+- OPERA 只从 `docs/hotpotQA/hotpot_dev_distractor_v1.json` 导入 HotpotQA paragraph；运行时不得读取 `answer`、`supporting_facts` 等标注，也不得混用技术文档 RAG V2 的 collection 或指标。
 - RAG 返回内容、用户输入和外部工具输出均是不可信数据；系统指令、工具权限与业务控制流不能由它们改变。
 
-技术文档 RAG V2 已合入主分支。RAG 的实际运行合同以 [README.md](README.md)、[docs/rag链路.md](docs/rag链路.md) 和 [docs/技术选型.md](docs/技术选型.md) 为准。
+技术文档 RAG V2 与 OPERA 的实际运行合同以 [README.md](README.md)、[docs/develop/rag链路.md](docs/develop/rag链路.md) 和 [docs/develop/技术选型.md](docs/develop/技术选型.md) 为准。
 
 ## 3. 当前代码地图
 
@@ -67,11 +68,24 @@ app/ragservice/config/rag-retrieval.yaml                        # 非敏感 BM25
 app/ai/rpc/internal/ragservice/rag.go                           # Go 侧 HTTP 客户端
 ```
 
+OPERA 复用同一 Python 服务进程，但使用独立索引、HTTP 合同与编排模块：
+
+```text
+app/ragservice/embedding-service/opera/hotpot_runner.py         # HotpotQA paragraph 离线导入、manifest/BM25 artifact
+app/ragservice/embedding-service/main.py                        # POST /opera/ask HTTP 入口
+app/ragservice/embedding-service/opera/executor.py              # ExecutionState、Planner/Analysis-Answer/Rewrite 调度
+app/ragservice/embedding-service/opera/llm.py                   # DeepSeek Responses JSON Schema/Pydantic、prompt resolver
+app/ragservice/embedding-service/opera/observability.py         # 可选 Langfuse trace/prompt/version/cost 观测
+```
+
+`POST /opera/ask` 的 `case` scope 仅供评测器使用（需 HotpotQA `_id`）；普通提问与面试演示用 `all`。最终答案必须来自计划中 `is_final=true` 的最后子目标，不另设 Final Agent。
+
 ### 数据与本地依赖
 
 - Chat 表建表脚本：[deploy/sql/ai_context.sql](deploy/sql/ai_context.sql)。该脚本包含重建 Chat 表的行为，执行前必须明确确认数据可丢弃。
 - 本地 AI RPC 依赖 MySQL `3306`、Redis `6379`、etcd `2379`；启动和 `.env` 注入方式见 [README.md](README.md)。
 - RAG V2 依赖 Qdrant `6333/6334`、DashScope embedding API 和明确设置的 `.env` `RAG_INDEX_VERSION`；Qdrant Docker 配置在 [deploy/rag/docker-compose-qdrant.yaml](deploy/rag/docker-compose-qdrant.yaml)。
+- OPERA 离线导入依赖 DashScope 与 Qdrant；`/opera/ask` 另需 `.env` 的 `OPERA_INDEX_VERSION`、`DEEPSEEK_API_KEY`、DashScope key、同版本 `out/opera-index/.../bm25_index.json`。Langfuse 凭据是可选观测配置，缺失或不可用时回退本地 prompt，不应阻断请求。
 - `.env`、`app/ai/rpc/etc/ai.yaml` 和 `out/` 均不应提交。
 
 ## 4. 已确认的技术选型
@@ -79,25 +93,29 @@ app/ai/rpc/internal/ragservice/rag.go                           # Go 侧 HTTP �
 | 领域 | 当前结论 | 详细位置 |
 | --- | --- | --- |
 | 旧 Chat 模型调用 | DeepSeek Chat Completions；密钥由进程环境变量注入 | [README.md](README.md) |
-| Embedding | 采用 OpenAI-compatible embedding API；RAG V2 当前使用 DashScope `qwen3.7-text-embedding`、1024 维 | [docs/技术选型.md](docs/技术选型.md) |
-| 技术文档 RAG | Markdown 结构化切分；版本化 Qdrant + BM25；Dense + BM25 经 RRF、MMR、P1 后组装上下文 | [docs/rag链路.md](docs/rag链路.md)、[docs/技术选型.md](docs/技术选型.md) |
+| Embedding | 采用 OpenAI-compatible embedding API；RAG V2 当前使用 DashScope `qwen3.7-text-embedding`、1024 维 | [docs/develop/技术选型.md](docs/develop/技术选型.md) |
+| 技术文档 RAG | Markdown 结构化切分；版本化 Qdrant + BM25；Dense + BM25 经 RRF、MMR、P1 后组装上下文 | [docs/develop/rag链路.md](docs/develop/rag链路.md)、[docs/develop/技术选型.md](docs/develop/技术选型.md) |
+| OPERA-style RAG | HotpotQA paragraph、独立版本化 collection；Planner → Hybrid Retriever → Analysis-Answer → 按需 Rewrite；DeepSeek Responses Schema/Pydantic 双校验 | [docs/develop/rag链路.md](docs/develop/rag链路.md) |
+| OPERA Agent 模型与成本 | 默认 `deepseek-v4-flash`；Langfuse 以高峰保守价计算 `input`、`cache_read_input_tokens`、`output` | [docs/develop/rag链路.md](docs/develop/rag链路.md) |
 
 ## 5. RAG 后续维护目标
 
-- RAG 的详细运行合同、参数、调用方式、评测和排查统一维护在 [docs/rag链路.md](docs/rag链路.md)；技术选择理由见 [docs/技术选型.md](docs/技术选型.md)。
-- 后续优先补充未参与调参的保留评测集，并用真实问题抽查旧 Chat 中的 RAG 注入效果。
+- RAG 的详细运行合同、参数、调用方式、评测和排查统一维护在 [docs/develop/rag链路.md](docs/develop/rag链路.md)；技术选择理由见 [docs/develop/技术选型.md](docs/develop/技术选型.md)。
+- 后续先完成一次真实 `/opera/ask` 的 provider/Qdrant 联调，再在相同语料与 scope 下评测 Hybrid 基线与 OPERA-style 闭环；`case` 与 `all` 指标必须分开报告。
+- RAG V2 仍需补充未参与调参的保留评测集，并用真实问题抽查旧 Chat 中的 RAG 注入效果。
 - 在没有评测证据前，不继续扩大检索功能或修改当前排序参数。
 
 ## 6. 推荐工作方式
 
-1. 先定位任务属于认证、旧 Chat，还是 RAG；避免跨链路改动。
+1. 先定位任务属于认证、旧 Chat、RAG V2 或 OPERA；避免跨链路改动。
 2. 阅读对应代码与技术设计章节，写出 source -> transform -> sink，明确输入从哪里来、在哪里改变、最终写到哪里。
 3. 给出一个可独立 Review 的最小阶段，等待确认。
-4. 实现后先验证本阶段；RAG 改动必须同时检查离线索引、在线 `/search` 和旧 Chat 调用兼容性。
+4. 实现后先验证本阶段；RAG V2 改动必须同时检查离线索引、在线 `/search` 和旧 Chat 调用兼容性；OPERA 改动必须检查 HotpotQA 导入、`/opera/ask` scope 边界、Schema 失败路径和双组评测隔离。
 
 ## 7. 尚未确定的问题
 
 - RAG 是否接入 rerank、检索 tracing，以及何时依据保留评测集调整当前参数。
 - 是否实现父 section 的展示级摘要，以及其是否需要单独 embedding。
+- OPERA 的真实 DeepSeek/Qdrant/embedding 联调与 Hybrid 基线、OPERA-style 双组评测尚未执行；Context/Memory 必须在此后单独设计，不能将 `ExecutionState` 当作持久化 Memory。
 
 在这些问题未由用户确认前，只能提出候选方案与验证计划，不得自行固定为生产设计。

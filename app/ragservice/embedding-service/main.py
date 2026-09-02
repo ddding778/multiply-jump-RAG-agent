@@ -29,6 +29,7 @@ from rag_index.retrieval_config import (
     load_retrieval_algorithm_config,
 )
 from opera.executor import OperaExecutor
+from opera.debug_trace import OperaTraceWriter
 from opera.hotpot_bm25 import load_hotpot_bm25_index
 from opera.llm import PromptResolver, ResponsesClient
 from opera.observability import LangfuseSettings, OperaObservability
@@ -329,6 +330,7 @@ def _get_opera_executor() -> OperaExecutor:
                 opera_config.max_repair_attempts,
                 agent_config.timeout_seconds,
                 observability,
+                reasoning_effort=opera_config.model_reasoning_effort,
             )
             for name, agent_config in opera_config.agents.items()
         }
@@ -342,6 +344,11 @@ def _get_opera_executor() -> OperaExecutor:
             opera_config.max_rewrites,
             opera_config.retrieval.top_k,
             observability,
+            OperaTraceWriter(
+                opera_config.debug_trace.enabled,
+                PROJECT_ROOT / opera_config.debug_trace.output_directory,
+                logger,
+            ),
         )
     return _opera_executor
 

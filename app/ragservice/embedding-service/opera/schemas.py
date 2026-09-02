@@ -37,10 +37,11 @@ class PlanResult(StrictSchema):
     steps: list[PlanStep] = Field(min_length=1, max_length=4)
     @model_validator(mode="after")
     def validate_plan(self) -> "PlanResult":
-        """校验唯一最终步骤和顺序依赖。"""
+        """校验连续步骤编号、唯一最终步骤和顺序依赖。"""
         ids=[step.step_id for step in self.steps]
         if len(ids)!=len(set(ids)) or sum(step.is_final for step in self.steps)!=1 or not self.steps[-1].is_final: raise ValueError("plan requires unique steps and one final last step")
         for index, step in enumerate(self.steps):
+            if step.step_id != f"step_{index + 1}": raise ValueError("plan step_id must be consecutive from step_1")
             if not set(step.depends_on).issubset(set(ids[:index])): raise ValueError("dependencies must reference previous steps")
         return self
 
@@ -56,10 +57,10 @@ class AnalysisStatus(StrEnum):
 class AnalysisResult(StrictSchema):
     """表示 Analysis-Answer Agent 的受限输出。"""
     status: AnalysisStatus
-    answer: str | None = Field(default=None, max_length=2000)
-    evidence: list[EvidenceRef] = Field(default_factory=list, max_length=6)
+    answer: str | None = Field(..., max_length=2000)
+    evidence: list[EvidenceRef] = Field(..., max_length=6)
     needs_rewrite: bool
-    failure_reason: str | None = Field(default=None, max_length=500)
+    failure_reason: str | None = Field(..., max_length=500)
     @model_validator(mode="after")
     def validate_result(self) -> "AnalysisResult":
         """校验支持与证据不足两种互斥状态。"""
@@ -74,7 +75,7 @@ class RewriteResult(StrictSchema):
 
 class StepResult(StrictSchema):
     """表示 Executor 写入 ExecutionState 的已验证步骤结果。"""
-    step_id: str; status: str; answer: str | None = None; evidence: list[EvidenceRef] = Field(default_factory=list); retrieval_query: str; rewrite_count: int = Field(ge=0, le=1)
+    step_id: str; status: str; answer: str | None = None; evidence: list[EvidenceRef] = Field(default_factory=list); retrieval_query: str; rewrite_count: int = Field(ge=0)
 
 class OperaAskResponse(StrictSchema):
     """定义 OPERA HTTP 响应。"""

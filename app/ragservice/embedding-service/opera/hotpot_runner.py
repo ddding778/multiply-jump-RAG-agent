@@ -13,13 +13,37 @@ from dotenv import load_dotenv
 
 from rag_index.retrieval_config import load_opera_retrieval_config, load_retrieval_algorithm_config
 
-from .hotpot_data import HotpotIndexConfig, HotpotIndexPlan, build_hotpot_index_plan, build_hotpot_payload, write_hotpot_artifacts
+from .embedding_checkpoint import (
+    checkpoint_path_for_plan,
+    completed_record_count,
+    load_or_initialize_checkpoint,
+    mark_batch_completed,
+    next_uncompleted_start,
+    save_checkpoint,
+)
+from .hotpot_data import (
+    HotpotIndexConfig,
+    HotpotIndexPlan,
+    HotpotIndexRecord,
+    build_hotpot_index_plan,
+    build_hotpot_payload,
+    write_hotpot_artifacts,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_EMBEDDING_MODEL = "qwen3.7-text-embedding"
 DEFAULT_EMBEDDING_DIMENSIONS = 1024
+DEFAULT_EMBEDDING_BATCH_SIZE = 20
+EMBEDDING_MODEL_MAX_BATCH_SIZES = {
+    "qwen3.7-text-embedding": 20,
+    "qwen3.7-text-embedding-flash": 20,
+    "text-embedding-v4": 10,
+    "text-embedding-v3": 10,
+    "text-embedding-v2": 25,
+    "text-embedding-v1": 25,
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -37,7 +61,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--embedding-base-url", default=os.getenv("RAG_EMBEDDING_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--embedding-model", default=os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL))
     parser.add_argument("--embedding-dimensions", type=int, default=int(os.getenv("RAG_EMBEDDING_DIMENSIONS", str(DEFAULT_EMBEDDING_DIMENSIONS))))
-    parser.add_argument("--embedding-batch-size", type=int, default=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", "10")))
+    parser.add_argument(
+        "--embedding-batch-size",
+        type=int,
+        default=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Only validate/import and write local artifacts; do not call embedding or Qdrant.")
     return parser.parse_args(argv)
 
@@ -62,6 +90,11 @@ def build_config(args: argparse.Namespace) -> HotpotIndexConfig:
     algorithm_config = load_retrieval_algorithm_config(args.retrieval_config)
     if args.embedding_dimensions <= 0 or args.embedding_batch_size <= 0:
         raise ValueError("embedding dimensions and batch size must be positive")
+    maximum_batch_size = embedding_batch_size_limit(args.embedding_model)
+    if maximum_batch_size is not None and args.embedding_batch_size > maximum_batch_size:
+        raise ValueError(
+            f"embedding batch size {args.embedding_batch_size} exceeds the {args.embedding_model} limit of {maximum_batch_size}"
+        )
     return HotpotIndexConfig(
         collection_prefix=opera_config.collection_prefix,
         embedding_model=args.embedding_model,
@@ -69,6 +102,16 @@ def build_config(args: argparse.Namespace) -> HotpotIndexConfig:
         embedding_batch_size=args.embedding_batch_size,
         bm25_tokenizer_version=algorithm_config.bm25_tokenizer_version,
     )
+
+
+def embedding_batch_size_limit(embedding_model: str) -> int | None:
+    """返回已知 embedding 模型单次请求允许的最大文本条数。
+
+    参数 embedding_model 为 OpenAI-compatible API 使用的模型名；返回正整数上限，
+    未内置限制的第三方模型返回 None，由其 provider 在调用时校验。
+    """
+
+    return EMBEDDING_MODEL_MAX_BATCH_SIZES.get(embedding_model.strip().lower())
 
 
 def create_qdrant_client(host: str, grpc_port: int) -> Any:
@@ -128,15 +171,51 @@ def create_embedding_client(api_key: str, base_url: str) -> Any:
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
-def embed_and_upsert(qdrant: Any, embedding_client: Any, plan: HotpotIndexPlan, logger: logging.Logger) -> None:
+def embed_and_upsert(
+    qdrant: Any,
+    embedding_client: Any,
+    plan: HotpotIndexPlan,
+    checkpoint_path: Path,
+    logger: logging.Logger,
+) -> None:
     """按批 embedding Hotpot paragraph 并同步写入对应 Qdrant collection。
 
-    参数 qdrant、embedding_client、plan、logger 分别为外部依赖、计划和安全日志器；无返回值。批次失败即抛出异常。
+    参数 qdrant、embedding_client、plan、checkpoint_path、logger 分别为外部依赖、计划、恢复状态路径和安全日志器；
+    无返回值。Qdrant 成功确认后才会原子更新 checkpoint，批次失败即抛出异常。
     """
 
     from qdrant_client.models import PointStruct
 
+    checkpoint, checkpoint_existed = load_or_initialize_checkpoint(checkpoint_path, plan)
+    if not checkpoint_existed:
+        save_checkpoint(checkpoint_path, checkpoint)
+    logger.info(
+        "event=opera_hotpot_embedding_checkpoint_ready collection=%s index_version=%s checkpoint=%s existed=%s completed_record_count=%d",
+        plan.collection_name,
+        plan.index_version,
+        checkpoint_path,
+        checkpoint_existed,
+        completed_record_count(checkpoint),
+    )
+
+    if checkpoint_existed:
+        recovery_start = next_uncompleted_start(checkpoint)
+        if recovery_start < len(plan.records):
+            recovery_records = plan.records[recovery_start : recovery_start + plan.config.embedding_batch_size]
+            if batch_is_already_upserted(qdrant, plan, recovery_records):
+                checkpoint = mark_batch_completed(checkpoint, recovery_start, recovery_records)
+                save_checkpoint(checkpoint_path, checkpoint)
+                logger.info(
+                    "event=opera_hotpot_embedding_checkpoint_reconciled collection=%s index_version=%s batch_start=%d batch_count=%d",
+                    plan.collection_name,
+                    plan.index_version,
+                    recovery_start,
+                    len(recovery_records),
+                )
+
     for start in range(0, len(plan.records), plan.config.embedding_batch_size):
+        if start < next_uncompleted_start(checkpoint):
+            continue
         records = plan.records[start : start + plan.config.embedding_batch_size]
         response = embedding_client.embeddings.create(
             model=plan.config.embedding_model,
@@ -152,6 +231,8 @@ def embed_and_upsert(qdrant: Any, embedding_client: Any, plan: HotpotIndexPlan, 
             ],
             wait=True,
         )
+        checkpoint = mark_batch_completed(checkpoint, start, records)
+        save_checkpoint(checkpoint_path, checkpoint)
         logger.info(
             "event=opera_hotpot_embedding_batch_upserted collection=%s index_version=%s batch_start=%d batch_count=%d",
             plan.collection_name,
@@ -159,6 +240,34 @@ def embed_and_upsert(qdrant: Any, embedding_client: Any, plan: HotpotIndexPlan, 
             start,
             len(records),
         )
+
+
+def batch_is_already_upserted(qdrant: Any, plan: HotpotIndexPlan, records: tuple[HotpotIndexRecord, ...]) -> bool:
+    """按确定性 point ID 回读一个未确认批次，判断其是否已完整写入 Qdrant。
+
+    参数 qdrant 为客户端，plan 为当前索引计划，records 为单个有序批次；
+    返回 True 表示每个 point 的索引版本和输入摘要均与计划一致，否则返回 False。函数不扫描整个 collection。
+    """
+
+    if not records:
+        return False
+    recovered_points = qdrant.retrieve(
+        collection_name=plan.collection_name,
+        ids=[record.point_id for record in records],
+        with_payload=["index_version", "embedding_input_hash"],
+        with_vectors=False,
+    )
+    points_by_id = {str(point.id): point for point in recovered_points}
+    for record in records:
+        point = points_by_id.get(record.point_id)
+        payload = getattr(point, "payload", None)
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("index_version") != plan.index_version:
+            return False
+        if payload.get("embedding_input_hash") != record.embedding_input_hash:
+            return False
+    return len(points_by_id) == len(records)
 
 
 def verify_index_count(qdrant: Any, plan: HotpotIndexPlan) -> None:
@@ -210,7 +319,8 @@ def main(argv: list[str] | None = None) -> int:
         qdrant = create_qdrant_client(args.qdrant_host, args.qdrant_grpc_port)
         ensure_collection(qdrant, plan)
         ensure_payload_indexes(qdrant, plan.collection_name)
-        embed_and_upsert(qdrant, create_embedding_client(api_key, args.embedding_base_url), plan, logger)
+        checkpoint_path = checkpoint_path_for_plan(args.output_dir, plan)
+        embed_and_upsert(qdrant, create_embedding_client(api_key, args.embedding_base_url), plan, checkpoint_path, logger)
         verify_index_count(qdrant, plan)
         manifest_path, bm25_path = write_hotpot_artifacts(plan, args.output_dir)
         logger.info(

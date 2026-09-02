@@ -15,6 +15,20 @@ from .observability import LangfuseSettings, OperaObservability
 T = TypeVar("T", bound=BaseModel)
 
 
+class ResponseOutputTextError(ValueError):
+    """表示 provider 返回了没有可用文本输出的 Responses 对象。"""
+
+    def __init__(self, schema_name: str, provider_metadata: dict[str, object]) -> None:
+        """保存调用的 Schema 名称及不含正文的 provider 响应元信息。
+
+        参数 schema_name 标识发生异常的 Agent Schema，provider_metadata 包含状态、错误类别和 output 项类型；无返回值。
+        """
+
+        super().__init__("Responses output_text must be non-empty text")
+        self.schema_name = schema_name
+        self.provider_metadata = provider_metadata
+
+
 @dataclass(frozen=True)
 class PromptDefinition:
     """表示已解析的 Agent system prompt。
@@ -128,11 +142,13 @@ class ResponsesClient:
         max_repair_attempts: int = 1,
         timeout_seconds: int | None = None,
         observability: OperaObservability | None = None,
+        reasoning_effort: str = "high",
     ) -> None:
-        """保存 provider 客户端、模型、输出限制、Schema 修复次数与可选观测器。
+        """保存 provider 客户端、模型、输出限制、思考强度、Schema 修复次数与可选观测器。
 
         参数 client 为 OpenAI-compatible Responses 客户端，model 为模型名，max_output_tokens 为软输出上限，
-        max_repair_attempts 为最大修复次数，timeout_seconds 为可选单请求超时，observability 为可选 Langfuse 观测器；无返回值。
+        max_repair_attempts 为最大修复次数，timeout_seconds 为可选单请求超时，observability 为可选 Langfuse 观测器，
+        reasoning_effort 为 DeepSeek Responses API 的思考强度；无返回值。
         """
 
         self._client = client
@@ -144,6 +160,7 @@ class ResponsesClient:
             settings=LangfuseSettings(False, "production", 0, False),
             logger=logging.getLogger("rag_service"),
         )
+        self._reasoning_effort = reasoning_effort
 
     def complete(
         self,
@@ -170,6 +187,7 @@ class ResponsesClient:
                 prompt_metadata={
                     **resolved_prompt.trace_metadata(),
                     "max_output_tokens": self._max_output_tokens,
+                    "reasoning_effort": self._reasoning_effort,
                     "timeout_seconds": self._timeout_seconds,
                 },
                 input_data=current_input,
@@ -180,6 +198,7 @@ class ResponsesClient:
                         "instructions": resolved_prompt.content,
                         "input": current_input,
                         "max_output_tokens": self._max_output_tokens,
+                        "reasoning": {"effort": self._reasoning_effort},
                         "text": {
                             "format": {
                                 "type": "json_schema",
@@ -196,8 +215,20 @@ class ResponsesClient:
                     generation.update(metadata={"result": "provider_error", "error_type": type(error).__name__})
                     raise
 
-                output_text = _response_output_text(response)
                 usage_details = _extract_usage_details(response)
+                provider_metadata = _provider_response_metadata(response)
+                try:
+                    output_text = _response_output_text(response)
+                except ValueError as error:
+                    generation.update(
+                        metadata={
+                            "result": "provider_empty_output",
+                            "schema_validation": "skipped",
+                            **provider_metadata,
+                        },
+                        usage_details=usage_details,
+                    )
+                    raise ResponseOutputTextError(schema_name, provider_metadata) from error
                 try:
                     parsed = schema_type.model_validate_json(output_text)
                 except ValidationError:
@@ -258,6 +289,71 @@ def _response_output_text(response: object) -> str:
     if not isinstance(output_text, str) or not output_text.strip():
         raise ValueError("Responses output_text must be non-empty text")
     return output_text
+
+
+def _provider_response_metadata(response: object) -> dict[str, object]:
+    """提取不含模型正文的 Responses 状态元信息。
+
+    参数 response 为 provider 返回对象；返回 response 状态、错误码、不完整原因和 output 项类型，
+    用于区分空文本、失败和截断，不保存模型正文或用户输入。
+    """
+
+    output_text = _read_string_field(response, "output_text")
+    output = _read_field(response, "output")
+    metadata: dict[str, object] = {
+        "provider_response_id": _read_string_field(response, "id"),
+        "provider_response_status": _read_string_field(response, "status"),
+        "provider_output_text_state": "nonempty" if output_text and output_text.strip() else "empty_or_missing",
+        "provider_output_count": len(output) if isinstance(output, list) else None,
+    }
+
+    error = _read_field(response, "error")
+    if error is not None:
+        metadata["provider_error_type"] = _read_string_field(error, "type")
+        metadata["provider_error_code"] = _read_string_field(error, "code")
+
+    incomplete_details = _read_field(response, "incomplete_details")
+    if incomplete_details is not None:
+        metadata["provider_incomplete_reason"] = _read_string_field(incomplete_details, "reason")
+
+    if isinstance(output, list):
+        item_types: list[str] = []
+        content_types: list[str] = []
+        for item in output:
+            item_type = _read_string_field(item, "type")
+            if item_type is not None:
+                item_types.append(item_type)
+            content = _read_field(item, "content")
+            if isinstance(content, list):
+                for content_item in content:
+                    content_type = _read_string_field(content_item, "type")
+                    if content_type is not None:
+                        content_types.append(content_type)
+        metadata["provider_output_item_types"] = item_types
+        metadata["provider_output_content_types"] = content_types
+
+    return {name: value for name, value in metadata.items() if value is not None}
+
+
+def _read_field(source: object | None, name: str) -> object | None:
+    """从对象或字典读取一个字段，不对 provider 返回结构作额外假设。
+
+    参数 source 为 provider 返回对象或字典，name 为字段名；返回字段值或 None。
+    """
+
+    if source is None:
+        return None
+    return source.get(name) if isinstance(source, dict) else getattr(source, name, None)
+
+
+def _read_string_field(source: object | None, name: str) -> str | None:
+    """读取非空字符串字段，避免把任意 provider 正文写入观测元数据。
+
+    参数 source 为 provider 返回对象或字典，name 为字段名；返回去除首尾空白后的字符串或 None。
+    """
+
+    value = _read_field(source, name)
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _extract_usage_details(response: object) -> dict[str, int] | None:

@@ -74,10 +74,22 @@ class OperaLangfuseConfig:
 
 
 @dataclass(frozen=True)
+class OperaDebugTraceConfig:
+    """保存 OPERA 本地调试轨迹输出配置。
+
+    参数 enabled 控制是否为每次请求写入调试轨迹，output_directory 为项目根目录下受限的 out 子路径；
+    返回对象不保存请求内容，仅描述运行配置。
+    """
+
+    enabled: bool
+    output_directory: str
+
+
+@dataclass(frozen=True)
 class OperaRuntimeConfig:
     """保存 OPERA 执行器的完整非敏感运行配置。
 
-    参数包含检索、模型、Agent、Schema 与 Langfuse 配置；返回对象仅用于构造服务，
+    参数包含检索、模型、Agent、Schema、Langfuse 与本地调试轨迹配置；返回对象仅用于构造服务，
     不读取环境变量中的密钥或索引版本。
     """
 
@@ -85,9 +97,11 @@ class OperaRuntimeConfig:
     max_steps: int
     max_rewrites: int
     model_name: str
+    model_reasoning_effort: str
     agents: dict[str, OperaAgentConfig]
     max_repair_attempts: int
     langfuse: OperaLangfuseConfig
+    debug_trace: OperaDebugTraceConfig
 
 
 def collection_name_for_version(collection_prefix: str, index_version: str) -> str:
@@ -223,6 +237,9 @@ def load_opera_runtime_config(path: Path = DEFAULT_RETRIEVAL_CONFIG_PATH) -> Ope
     model_name = model.get("name")
     if not isinstance(model_name, str) or not model_name.strip():
         raise RetrievalConfigError("opera.model.name must be a non-empty string")
+    reasoning_effort = model.get("reasoning_effort")
+    if reasoning_effort not in {"none", "low", "high", "max"}:
+        raise RetrievalConfigError("opera.model.reasoning_effort must be none, low, high or max")
 
     agents = _parse_opera_agents(opera.get("agents"))
     schema_validation = opera.get("schema_validation")
@@ -241,9 +258,11 @@ def load_opera_runtime_config(path: Path = DEFAULT_RETRIEVAL_CONFIG_PATH) -> Ope
         max_steps=max_steps,
         max_rewrites=max_rewrites,
         model_name=model_name.strip(),
+        model_reasoning_effort=reasoning_effort,
         agents=agents,
         max_repair_attempts=max_repair_attempts,
         langfuse=_parse_opera_langfuse_config(opera.get("langfuse")),
+        debug_trace=_parse_opera_debug_trace_config(opera.get("debug_trace")),
     )
 
 
@@ -315,6 +334,28 @@ def _parse_opera_langfuse_config(value: object) -> OperaLangfuseConfig:
         capture_input_output=capture_input_output,
         prompts={key: value.strip() for key, value in prompts.items()},
     )
+
+
+def _parse_opera_debug_trace_config(value: object) -> OperaDebugTraceConfig:
+    """校验 OPERA 本地调试轨迹的开关和受限输出目录。
+
+    参数 value 为 YAML 的 opera.debug_trace 节；返回仅含开关与相对 out 路径的配置。
+    缺失、类型错误、绝对路径或路径逃逸时抛出 RetrievalConfigError。
+    """
+
+    if not isinstance(value, dict):
+        raise RetrievalConfigError("opera.debug_trace must be a mapping")
+    enabled = value.get("enabled")
+    output_directory = value.get("output_directory")
+    if not isinstance(enabled, bool):
+        raise RetrievalConfigError("opera.debug_trace.enabled must be a boolean")
+    if not isinstance(output_directory, str) or not output_directory.strip():
+        raise RetrievalConfigError("opera.debug_trace.output_directory must be a non-empty string")
+
+    relative_path = Path(output_directory)
+    if relative_path.is_absolute() or not relative_path.parts or relative_path.parts[0] != "out" or ".." in relative_path.parts:
+        raise RetrievalConfigError("opera.debug_trace.output_directory must stay under out")
+    return OperaDebugTraceConfig(enabled=enabled, output_directory=relative_path.as_posix())
 
 
 def _load_config_mapping(path: Path) -> dict[str, object]:

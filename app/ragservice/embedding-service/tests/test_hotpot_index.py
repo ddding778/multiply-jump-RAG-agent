@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from opera.hotpot_bm25 import load_hotpot_bm25_index
-from opera.hotpot_data import HotpotIndexConfig, build_hotpot_index_plan, load_hotpot_cases, write_hotpot_artifacts
+from opera.hotpot_data import HOTPOT_INDEX_CONTRACT_VERSION, HotpotIndexConfig, build_hotpot_index_plan, load_hotpot_cases, write_hotpot_artifacts
 
 
 class HotpotIndexTest(unittest.TestCase):
@@ -71,6 +71,7 @@ class HotpotIndexTest(unittest.TestCase):
         self.assertEqual(64, len(plan.index_version))
         self.assertEqual(6, len(plan.records))
         self.assertEqual("hotpot_manifest_metadata", json.loads(manifest_lines[0])["record_type"])
+        self.assertEqual(HOTPOT_INDEX_CONTRACT_VERSION, json.loads(manifest_lines[0])["index_contract_version"])
         self.assertEqual("hotpot_bm25_index", bm25["record_type"])
         self.assertEqual({"case-a", "case-b"}, set(bm25["case_chunk_ids"]))
 

@@ -9,7 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rag_index.retrieval_config import RetrievalConfigError, collection_name_for_version, load_retrieval_algorithm_config
+from rag_index.retrieval_config import (
+    RetrievalConfigError,
+    collection_name_for_version,
+    load_opera_runtime_config,
+    load_retrieval_algorithm_config,
+)
 
 
 class RetrievalConfigTest(unittest.TestCase):
@@ -57,6 +62,18 @@ class RetrievalConfigTest(unittest.TestCase):
         self.assertEqual("tech_docs_v2_" + index_version, collection_name_for_version("tech_docs_v2", index_version))
         with self.assertRaises(RetrievalConfigError):
             collection_name_for_version("tech docs", index_version)
+
+    def test_default_opera_debug_trace_and_rewrite_limits_are_loaded(self) -> None:
+        """验证默认 OPERA 配置启用本地轨迹、两次改写和 Langfuse 原文采集。"""
+
+        config = load_opera_runtime_config()
+
+        self.assertEqual(4, config.max_steps)
+        self.assertEqual(2, config.max_rewrites)
+        self.assertEqual("low", config.model_reasoning_effort)
+        self.assertTrue(config.debug_trace.enabled)
+        self.assertEqual("out/opera-traces", config.debug_trace.output_directory)
+        self.assertTrue(config.langfuse.capture_input_output)
 
 
 if __name__ == "__main__":

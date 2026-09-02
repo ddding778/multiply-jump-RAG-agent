@@ -17,6 +17,7 @@ from rag_index.retrieval_config import collection_name_for_version
 
 HOTPOT_INDEX_SCHEMA_VERSION = 1
 HOTPOT_CHUNKER_VERSION = "hotpot-paragraph-v1"
+HOTPOT_INDEX_CONTRACT_VERSION = "hotpot-index-contract-v2"
 
 
 @dataclass(frozen=True)
@@ -67,8 +68,8 @@ class HotpotCase:
 class HotpotIndexConfig:
     """保存 HotpotQA 独立索引的确定性配置。
 
-    参数 collection_prefix、embedding_model、embedding_dimensions、embedding_batch_size 与 bm25_tokenizer_version
-    共同参与 index_version 计算；返回对象不包含密钥或 Qdrant 连接。
+    参数 collection_prefix、embedding_model、embedding_dimensions 与 bm25_tokenizer_version 共同参与 index_version 计算；
+    embedding_batch_size 仅决定离线请求和 checkpoint 的恢复粒度。返回对象不包含密钥或 Qdrant 连接。
     """
 
     collection_prefix: str
@@ -277,6 +278,7 @@ def _write_manifest(plan: HotpotIndexPlan, output_dir: Path) -> Path:
         "collection_prefix": plan.config.collection_prefix,
         "dataset_sha256": plan.dataset_sha256,
         "chunker_version": HOTPOT_CHUNKER_VERSION,
+        "index_contract_version": HOTPOT_INDEX_CONTRACT_VERSION,
         "embedding_model": plan.config.embedding_model,
         "embedding_dimensions": plan.config.embedding_dimensions,
         "bm25_tokenizer_version": plan.config.bm25_tokenizer_version,
@@ -364,6 +366,7 @@ def _build_index_version(config: HotpotIndexConfig, dataset_sha256: str, records
     """
 
     contract = {
+        "index_contract_version": HOTPOT_INDEX_CONTRACT_VERSION,
         "chunker_version": HOTPOT_CHUNKER_VERSION,
         "collection_prefix": config.collection_prefix,
         "dataset_sha256": dataset_sha256,
