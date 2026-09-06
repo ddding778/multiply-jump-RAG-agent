@@ -17,16 +17,16 @@
 
 ## 2. 项目目标与当前边界
 
-这是一个 Go / go-zero 学习项目。当前存在用户认证、旧 Chat 和技术文档 RAG 三条链路；后续主线是新增一个与旧 Chat 解耦的 Coding Agent。
+这是一个 Go / go-zero 学习项目，当前维护用户认证、旧 Chat、技术文档 RAG V2，以及面向面试演示的 OPERA-style Multi-Agent Multi-hop RAG。Coding Agent 已迁移到其他项目，本仓库不再承担其设计或实现。
 
 当前阶段的原则：
 
-- 旧 Chat 是需要维护安全和运行基线的独立链路，不应成为 Coding Agent 的实现前置条件。
-- Coding Agent 使用独立的 Responses 链路和自维护上下文；不要依赖某一模型厂商的上下文 ID。
+- 旧 Chat 是需要维护安全和运行基线的独立链路。
 - 技术文档 RAG 只索引 `docs/**/*.md`，不把项目源码 `app/` 当作检索语料。
+- OPERA 只从 `docs/hotpotQA/hotpot_dev_distractor_v1.json` 导入 HotpotQA paragraph；运行时不得读取 `answer`、`supporting_facts` 等标注，也不得混用技术文档 RAG V2 的 collection 或指标。
 - RAG 返回内容、用户输入和外部工具输出均是不可信数据；系统指令、工具权限与业务控制流不能由它们改变。
 
-详细方案和计划见 [docs/coding-agent技术设计.md](docs/coding-agent技术设计.md)。该文档同时包含已确认设计与未来计划；实施前必须区分两者。
+技术文档 RAG V2 与 OPERA 的实际运行合同以 [README.md](README.md)、[docs/develop/rag链路.md](docs/develop/rag链路.md) 和 [docs/develop/技术选型.md](docs/develop/技术选型.md) 为准。
 
 ## 3. 当前代码地图
 
@@ -59,61 +59,63 @@ Gateway Chat Logic
 
 AI RPC 入口是 [app/ai/rpc/ai.go](app/ai/rpc/ai.go)。会话必须按 `user_id + session_id` 归属查询，不能只按 `session_id` 读取。Redis 是旧 Chat 的历史缓存；持久化消息以 MySQL 为准。
 
-旧 RAG 的 Python 服务位于：
+技术文档 RAG V2 的 Python 服务位于：
 
 ```text
-app/ragservice/embedding-service/rag_index/offline_runner.py  # V2 离线切分、embedding、写 Qdrant
-app/ragservice/embedding-service/main.py               # 在线检索服务
-app/ai/rpc/internal/ragservice/rag.go                   # Go 侧 HTTP 客户端
+app/ragservice/embedding-service/rag_index/offline_runner.py  # 离线切分、embedding、写 Qdrant、生成 manifest/BM25 artifact
+app/ragservice/embedding-service/main.py                       # 在线 Dense + BM25 + RRF + MMR + P1 检索服务
+app/ragservice/config/rag-retrieval.yaml                        # 非敏感 BM25/RRF/MMR 参数
+app/ai/rpc/internal/ragservice/rag.go                           # Go 侧 HTTP 客户端
 ```
+
+OPERA 复用同一 Python 服务进程，但使用独立索引、HTTP 合同与编排模块：
+
+```text
+app/ragservice/embedding-service/opera/hotpot_runner.py         # HotpotQA paragraph 离线导入、manifest/BM25 artifact
+app/ragservice/embedding-service/main.py                        # POST /opera/ask HTTP 入口
+app/ragservice/embedding-service/opera/executor.py              # ExecutionState、Planner/Analysis-Answer/Rewrite 调度
+app/ragservice/embedding-service/opera/llm.py                   # DeepSeek Responses JSON Schema/Pydantic、prompt resolver
+app/ragservice/embedding-service/opera/observability.py         # 可选 Langfuse trace/prompt/version/cost 观测
+```
+
+`POST /opera/ask` 的 `case` scope 仅供评测器使用（需 HotpotQA `_id`）；普通提问与面试演示用 `all`。最终答案必须来自计划中 `is_final=true` 的最后子目标，不另设 Final Agent。
 
 ### 数据与本地依赖
 
 - Chat 表建表脚本：[deploy/sql/ai_context.sql](deploy/sql/ai_context.sql)。该脚本包含重建 Chat 表的行为，执行前必须明确确认数据可丢弃。
 - 本地 AI RPC 依赖 MySQL `3306`、Redis `6379`、etcd `2379`；启动和 `.env` 注入方式见 [README.md](README.md)。
+- RAG V2 依赖 Qdrant `6333/6334`、DashScope embedding API 和明确设置的 `.env` `RAG_INDEX_VERSION`；Qdrant Docker 配置在 [deploy/rag/docker-compose-qdrant.yaml](deploy/rag/docker-compose-qdrant.yaml)。
+- OPERA 离线导入依赖 DashScope 与 Qdrant；`/opera/ask` 另需 `.env` 的 `OPERA_INDEX_VERSION`、`DEEPSEEK_API_KEY`、DashScope key、同版本 `out/opera-index/.../bm25_index.json`。Langfuse 凭据是可选观测配置，缺失或不可用时回退本地 prompt，不应阻断请求。
 - `.env`、`app/ai/rpc/etc/ai.yaml` 和 `out/` 均不应提交。
 
 ## 4. 已确认的技术选型
 
 | 领域 | 当前结论 | 详细位置 |
 | --- | --- | --- |
-| 模型调用 | 统一采用 OpenAI-compatible 合同；Responses Adapter 与 Chat Completions Adapter 都保留 | 技术设计第 7.2 节 |
-| Embedding | 采用 OpenAI-compatible embedding API，模型和供应商可替换 | 技术设计第 7.3 节 |
-| Coding Agent | 独立于旧 Chat；先规划、Writer 编码、Auditor 审计、受控修订 | 技术设计第 3.1、5、9、19 节 |
-| 长期记忆 | 单用户 Qdrant-only；scope 仅 `conversation`、`global` | 技术设计第 8.1、10.1、10.2 节 |
-| 上下文 | Coding Agent 自维护上下文快照；Redis 不作为其恢复来源 | 技术设计第 8.3、10.3 节 |
-| 技术文档 RAG | Markdown 结构化切分；Dense + BM25，经 RRF、MMR 后再组装上下文 | 技术设计第 3.3、10.4 节 |
-| 可观测性 | Langfuse Cloud 追踪 LLM；Loki 仅作为后续传统服务日志演进 | 技术设计第 14 节 |
-| 异步事件 | Redis Streams、Outbox、消费幂等属于 V2 以后按需演进，不是 V1 前置条件 | 技术设计第 10.5、19 节 |
+| 旧 Chat 模型调用 | DeepSeek Chat Completions；密钥由进程环境变量注入 | [README.md](README.md) |
+| Embedding | 采用 OpenAI-compatible embedding API；RAG V2 当前使用 DashScope `qwen3.7-text-embedding`、1024 维 | [docs/develop/技术选型.md](docs/develop/技术选型.md) |
+| 技术文档 RAG | Markdown 结构化切分；版本化 Qdrant + BM25；Dense + BM25 经 RRF、MMR、P1 后组装上下文 | [docs/develop/rag链路.md](docs/develop/rag链路.md)、[docs/develop/技术选型.md](docs/develop/技术选型.md) |
+| OPERA-style RAG | HotpotQA paragraph、独立版本化 collection；Planner → Hybrid Retriever → Analysis-Answer → 按需 Rewrite；DeepSeek Responses Schema/Pydantic 双校验 | [docs/develop/rag链路.md](docs/develop/rag链路.md) |
+| OPERA Agent 模型与成本 | 默认 `deepseek-v4-flash`；Langfuse 以高峰保守价计算 `input`、`cache_read_input_tokens`、`output` | [docs/develop/rag链路.md](docs/develop/rag链路.md) |
 
-## 5. RAG V2 已确认的切分约束
+## 5. RAG 后续维护目标
 
-- 标题路径使用可变长标题栈：每项保存 `level` 和 `text`；新标题出现时弹出所有 `level >= 新等级` 的项再压入，不假定 Markdown 必须三级或标题等级连续。
-- 先按 Markdown 结构切分，再按段落和句子进行长度兜底；列表、表格、引用和 fenced code block 尽量作为完整语义块保留。
-- embedding 输入包含标题路径和正文；payload 也保留标题路径、文档标识、section 标识和相邻 chunk 指针。
-- 不机械拼接“上一段”。只允许在同一标题区间内按自然语义块合并，避免跨标题污染。
-- Qdrant 不规定单个 point 的 token 上限；上限受 embedding 模型输入窗口、召回精度和最终上下文成本共同约束。具体生产阈值必须由评测集确定，不能把讨论中的临时数值当作正式配置。
-- V1 仅对每个可检索 chunk 建一个 embedding；命中后按 token 预算读取 `prev_chunk_id` / `next_chunk_id`。不要同时为父子内容大量重复建向量。
+- RAG 的详细运行合同、参数、调用方式、评测和排查统一维护在 [docs/develop/rag链路.md](docs/develop/rag链路.md)；技术选择理由见 [docs/develop/技术选型.md](docs/develop/技术选型.md)。
+- 后续先完成一次真实 `/opera/ask` 的 provider/Qdrant 联调，再在相同语料与 scope 下评测 Hybrid 基线与 OPERA-style 闭环；`case` 与 `all` 指标必须分开报告。
+- RAG V2 仍需补充未参与调参的保留评测集，并用真实问题抽查旧 Chat 中的 RAG 注入效果。
+- 在没有评测证据前，不继续扩大检索功能或修改当前排序参数。
 
 ## 6. 推荐工作方式
 
-1. 先定位任务属于认证、旧 Chat、RAG，还是未来 Coding Agent；避免跨链路改动。
+1. 先定位任务属于认证、旧 Chat、RAG V2 或 OPERA；避免跨链路改动。
 2. 阅读对应代码与技术设计章节，写出 source -> transform -> sink，明确输入从哪里来、在哪里改变、最终写到哪里。
 3. 给出一个可独立 Review 的最小阶段，等待确认。
-4. 实现后先验证本阶段，再开始下一模块；不要把 Chunker、Embedding、Qdrant、BM25 和 Chat 接入一次性混改。
+4. 实现后先验证本阶段；RAG V2 改动必须同时检查离线索引、在线 `/search` 和旧 Chat 调用兼容性；OPERA 改动必须检查 HotpotQA 导入、`/opera/ask` scope 边界、Schema 失败路径和双组评测隔离。
 
-## 7. 当前优先级
+## 7. 尚未确定的问题
 
-1. 技术文档 RAG V2 的 Markdown Chunker：标题栈、语义块、长度兜底、邻接元数据和测试。
-2. 再做 embedding 写入和新的 Qdrant collection。
-3. 再做 BM25、RRF、MMR 与召回上下文组装。
-4. RAG 验收后，再实现独立 Coding Agent 的 Provider Gateway、Memory 和状态机。
-
-## 8. 尚未确定的问题
-
-- 最终使用哪一家云端 embedding 服务及其模型输入窗口、维度、价格。
-- Chunk 的正式 soft/hard token 阈值，以及 Top-K、RRF、MMR 等参数；必须由评测集结果决定。
+- RAG 是否接入 rerank、检索 tracing，以及何时依据保留评测集调整当前参数。
 - 是否实现父 section 的展示级摘要，以及其是否需要单独 embedding。
-- Coding Agent 的工作区隔离、文件写工具权限和实际前端形态。
+- OPERA 的真实 DeepSeek/Qdrant/embedding 联调与 Hybrid 基线、OPERA-style 双组评测尚未执行；Context/Memory 必须在此后单独设计，不能将 `ExecutionState` 当作持久化 Memory。
 
 在这些问题未由用户确认前，只能提出候选方案与验证计划，不得自行固定为生产设计。

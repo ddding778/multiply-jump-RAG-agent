@@ -688,6 +688,30 @@ def _fuse_rrf(
     return sorted(candidates.values(), key=_fusion_sort_key)
 
 
+def fuse_rrf(
+    dense_chunks: list[RetrievedChunk],
+    bm25_chunks: list[RetrievedChunk],
+    bm25_ranks: dict[str, int],
+    rank_constant: int,
+    dense_weight: float,
+    bm25_weight: float,
+) -> list[FusionCandidate]:
+    """公开复用 Dense 与 BM25 的稳定 RRF 融合实现。
+
+    参数与内部 _fuse_rrf 相同，分别为两路候选、BM25 排名及 RRF 配置；返回按稳定规则排序的融合候选。
+    OPERA paragraph Retriever 复用此函数，避免复制并分叉现有 Hybrid 排名逻辑。
+    """
+
+    return _fuse_rrf(
+        dense_chunks=dense_chunks,
+        bm25_chunks=bm25_chunks,
+        bm25_ranks=bm25_ranks,
+        rank_constant=rank_constant,
+        dense_weight=dense_weight,
+        bm25_weight=bm25_weight,
+    )
+
+
 def _select_mmr(
     candidates: list[FusionCandidate],
     candidate_vectors: dict[str, list[float]],
@@ -730,6 +754,26 @@ def _select_mmr(
         selected.append(selected_candidate)
         remaining = [candidate for candidate in remaining if candidate.chunk.chunk_id != selected_candidate.chunk.chunk_id]
     return [replace(candidate.chunk, score=candidate.rrf_score) for candidate in selected]
+
+
+def select_mmr(
+    candidates: list[FusionCandidate],
+    candidate_vectors: dict[str, list[float]],
+    top_k: int,
+    mmr_lambda: float,
+) -> list[RetrievedChunk]:
+    """公开复用稳定的 MMR 去重实现。
+
+    参数 candidates 为 RRF 结果，candidate_vectors 为候选向量，top_k 为保留数，mmr_lambda 为相关性权重；
+    返回 MMR 选中的候选。OPERA 仅替换 paragraph 数据模型，不修改 V2 的排序语义。
+    """
+
+    return _select_mmr(
+        candidates=candidates,
+        candidate_vectors=candidate_vectors,
+        top_k=top_k,
+        mmr_lambda=mmr_lambda,
+    )
 
 
 def _normalize_rrf_scores(candidates: list[FusionCandidate]) -> dict[str, float]:
