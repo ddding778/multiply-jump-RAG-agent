@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import time
+from uuid import uuid4
 from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from .observability import LangfuseSettings, OperaObservability
+from .events import emit
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -99,14 +102,18 @@ class PromptResolver:
             remote_prompt=None,
         )
         if self._langfuse_client is None:
+            emit("initialization", stage="prompt", message=f"{name} 使用本地提示词。")
             return local_prompt
 
+        emit("initialization", stage="prompt", message=f"正在读取 {name}，远端超时将回退本地提示词…")
         try:
             remote_prompt = self._langfuse_client.get_prompt(
                 name,
                 type="text",
                 label=self._prompt_label,
                 cache_ttl_seconds=self._cache_ttl_seconds,
+                max_retries=0,
+                fetch_timeout_seconds=3,
             )
             content = remote_prompt.compile()
             if not isinstance(content, str) or not content.strip():
@@ -128,7 +135,8 @@ class PromptResolver:
                 name,
                 type(error).__name__,
             )
-            return local_prompt
+        emit("dependency_warning", category="langfuse", message=f"{name} 远端读取失败，已回退本地提示词，继续执行。")
+        return local_prompt
 
 
 class ResponsesClient:
@@ -178,6 +186,11 @@ class ResponsesClient:
         resolved_prompt = _coerce_prompt(prompt)
         current_input = input_text
         for attempt in range(self._max_repair_attempts + 1):
+            call_id = str(uuid4())
+            started = time.monotonic()
+            emit("agent_started", call_id=call_id, agent=schema_name, attempt=attempt + 1,
+                 model=self._model, instructions=resolved_prompt.content, input=current_input,
+                 prompt_metadata=resolved_prompt.trace_metadata())
             with self._observability.generation(
                 name=f"{schema_name}-generation",
                 model=self._model,
@@ -212,6 +225,7 @@ class ResponsesClient:
                         request["timeout"] = self._timeout_seconds
                     response = self._client.responses.create(**request)
                 except Exception as error:
+                    emit("agent_failed", call_id=call_id, error_type=type(error).__name__)
                     generation.update(metadata={"result": "provider_error", "error_type": type(error).__name__})
                     raise
 
@@ -220,6 +234,8 @@ class ResponsesClient:
                 try:
                     output_text = _response_output_text(response)
                 except ValueError as error:
+                    emit("agent_failed", call_id=call_id, error_type="ResponseOutputTextError",
+                         provider_metadata=provider_metadata)
                     generation.update(
                         metadata={
                             "result": "provider_empty_output",
@@ -229,9 +245,13 @@ class ResponsesClient:
                         usage_details=usage_details,
                     )
                     raise ResponseOutputTextError(schema_name, provider_metadata) from error
+                emit("agent_output", call_id=call_id, output=output_text,
+                     duration_ms=round((time.monotonic() - started) * 1000), usage=usage_details)
                 try:
                     parsed = schema_type.model_validate_json(output_text)
                 except ValidationError:
+                    emit("agent_validated", call_id=call_id, validation="failed",
+                         will_retry=attempt < self._max_repair_attempts)
                     generation.update(
                         output_data=output_text,
                         metadata={"schema_validation": "failed"},
@@ -240,6 +260,7 @@ class ResponsesClient:
                     if attempt == self._max_repair_attempts:
                         raise
                 else:
+                    emit("agent_validated", call_id=call_id, validation="passed", will_retry=False)
                     generation.update(
                         output_data=output_text,
                         metadata={"schema_validation": "passed"},

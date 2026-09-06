@@ -1,0 +1,13 @@
+/.vscode
+app/ai/rpc/etc/ai.yaml
+.env
+.agents/skills/langfuse/
+docs
+build
+out/
+logs/
+__pycache__/
+*.py[cod]
+app/ai/rpc/internal/logic/logs/
+build/
+.gitignore

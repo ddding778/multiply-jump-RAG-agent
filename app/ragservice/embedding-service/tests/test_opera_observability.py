@@ -222,7 +222,8 @@ class OperaObservabilityTest(unittest.TestCase):
         self.assertEqual("remote prompt", prompt.content)
         self.assertEqual(7, prompt.version)
         self.assertEqual(
-            [{"name": "opera-planner-system", "type": "text", "label": "production", "cache_ttl_seconds": 300}],
+            [{"name": "opera-planner-system", "type": "text", "label": "production", "cache_ttl_seconds": 300,
+              "max_retries": 0, "fetch_timeout_seconds": 3}],
             fake_langfuse.get_prompt_calls,
         )
 

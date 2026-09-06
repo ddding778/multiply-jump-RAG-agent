@@ -8,7 +8,8 @@ import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from openai import OpenAI
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
@@ -35,6 +36,9 @@ from opera.llm import PromptResolver, ResponsesClient
 from opera.observability import LangfuseSettings, OperaObservability
 from opera.retriever import HotpotHybridRetriever, HotpotRetrievalSettings
 from opera.schemas import OperaAskRequest, OperaAskResponse
+from opera.streaming import OperaStream, stream_slot
+from opera.events import emit
+from opera.diagnostics import check_demo_dependencies
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -232,6 +236,7 @@ def _get_opera_executor() -> OperaExecutor:
     global _opera_executor
     if _opera_executor is not None:
         return _opera_executor
+    emit("initialization", stage="executor_lock", message="正在等待执行器初始化锁…")
     with _opera_lock:
         if _opera_executor is not None:
             return _opera_executor
@@ -247,6 +252,7 @@ def _get_opera_executor() -> OperaExecutor:
         algorithm_config = load_retrieval_algorithm_config()
         opera_config = load_opera_runtime_config()
         collection_name = collection_name_for_version(opera_config.retrieval.collection_prefix, index_version)
+        emit("initialization", stage="bm25", message="正在加载全量 HotpotQA BM25 索引，首次加载需要一些时间…")
         bm25_index = load_hotpot_bm25_index(
             PROJECT_ROOT
             / "out"
@@ -263,15 +269,19 @@ def _get_opera_executor() -> OperaExecutor:
             "RAG_EMBEDDING_DIMENSIONS",
             DEFAULT_EMBEDDING_DIMENSIONS,
         )
+        emit("initialization", stage="index_validation", message="正在核对 Qdrant 与 BM25 全量索引的一致性…")
         retriever = HotpotHybridRetriever(
             OpenAI(
                 api_key=embedding_api_key,
                 base_url=os.getenv("RAG_EMBEDDING_BASE_URL", DEFAULT_BASE_URL),
+                timeout=20,
             ),
             QdrantClient(
                 host=os.getenv("QDRANT_HOST", "localhost"),
                 grpc_port=_positive_int_from_environment("QDRANT_GRPC_PORT", 6334),
                 prefer_grpc=True,
+                timeout=10,
+                check_compatibility=False,
             ),
             bm25_index,
             HotpotRetrievalSettings(
@@ -288,6 +298,7 @@ def _get_opera_executor() -> OperaExecutor:
             logger,
         )
 
+        emit("initialization", stage="langfuse", message="正在准备可选 Langfuse 观测与提示词…")
         observability = OperaObservability.create(
             LangfuseSettings(
                 enabled=opera_config.langfuse.enabled,
@@ -353,6 +364,12 @@ def _get_opera_executor() -> OperaExecutor:
     return _opera_executor
 
 
+def _get_demo_executor() -> OperaExecutor:
+    """预检演示依赖后取得执行器；无参数，返回可用执行器，每次请求均验证 Qdrant 连接。"""
+    check_demo_dependencies(PROJECT_ROOT)
+    return _get_opera_executor()
+
+
 @app.post("/opera/ask", response_model=OperaAskResponse)
 async def opera_ask(req: OperaAskRequest) -> OperaAskResponse:
     """执行一次 OPERA 多 Agent 多跳请求，不影响旧 Chat 或 /search。"""
@@ -361,6 +378,25 @@ async def opera_ask(req: OperaAskRequest) -> OperaAskResponse:
     except Exception as error:
         logger.error("event=opera_ask_failed error_type=%s",type(error).__name__)
         raise HTTPException(status_code=503,detail="OPERA service is unavailable") from error
+
+
+@app.post("/opera/ask/stream")
+async def opera_ask_stream(req: OperaAskRequest, request: Request) -> StreamingResponse:
+    """为本机演示返回实时事件；req 为 all 请求，request 提供来源信息，返回 SSE，拒绝远程与并发请求。"""
+    if os.getenv("OPERA_DEMO_STREAM_ENABLED", "").lower() not in {"1", "true"}:
+        raise HTTPException(status_code=404, detail="OPERA demo streaming is disabled")
+    if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(status_code=403, detail="Local demo access only")
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in {"http://127.0.0.1:5173", "http://localhost:5173"}:
+        raise HTTPException(status_code=403, detail="Demo origin is not allowed")
+    if req.retrieval_scope.value != "all" or not req.question.strip():
+        raise HTTPException(status_code=422, detail="Demo requires a non-empty all-scope question")
+    if not stream_slot.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="An OPERA demo run is still active")
+    stream = OperaStream(req, _get_demo_executor, stream_slot.release)
+    return StreamingResponse(stream.frames(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @app.on_event("shutdown")

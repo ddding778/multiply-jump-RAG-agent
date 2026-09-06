@@ -11,6 +11,7 @@ from .agents.analysis_answer import analyze
 from .agents.planner import plan
 from .agents.rewriter import rewrite
 from .debug_trace import OperaTraceWriter
+from .events import emit, event_step
 from .llm import ResponseOutputTextError
 from .observability import LangfuseSettings, OperaObservability
 from .schemas import AnalysisStatus, EvidenceRef, OperaAskResponse, PlanResult, PlanStep, RetrievalScope, StepResult
@@ -76,14 +77,15 @@ class OperaExecutor:
         scope: RetrievalScope,
         case_id: str | None,
         top_k: int | None = None,
+        run_id: str | None = None,
     ) -> OperaAskResponse:
         """执行一次多跳请求，并仅返回 final 步的已验证答案。
 
         参数 question 为用户问题，scope 与 case_id 限定检索范围，top_k 可覆盖默认候选数；
-        返回完成或证据不足的 OperaAskResponse。模型、检索和 Agent 输出均被嵌套记录到同一 trace。
+        run_id 可由本地流式入口指定；返回完成或证据不足的 OperaAskResponse。
         """
 
-        state = ExecutionState(str(uuid4()), question, scope, case_id)
+        state = ExecutionState(run_id or str(uuid4()), question, scope, case_id)
         state.trace = {
             "trace_version": "opera_execution_trace_v2",
             "run_id": state.run_id,
@@ -147,6 +149,7 @@ class OperaExecutor:
         if len(state.plan.steps) > self._max_steps:
             raise ValueError("plan exceeds configured max_steps")
         state.trace["plan"] = state.plan.model_dump()
+        emit("plan_ready", plan=state.plan.model_dump())
         logger.info(
             "event=opera_plan_ready run_id=%s planned_step_count=%s",
             state.run_id,
@@ -154,7 +157,9 @@ class OperaExecutor:
         )
 
         for step in state.plan.steps:
-            response = self._execute_step(state, step, top_k)
+            with event_step(step.step_id):
+                emit("step_started", step=step.model_dump())
+                response = self._execute_step(state, step, top_k)
             if response is not None:
                 return response
 
@@ -249,9 +254,11 @@ class OperaExecutor:
                     retrieval_query=query,
                     rewrite_count=rewrites,
                 )
+                emit("step_completed", result=state.step_results[step.step_id].model_dump())
                 return None
 
             if rewrites >= self._max_rewrites:
+                emit("step_insufficient", failure_reason=analysis.failure_reason)
                 state.step_results[step.step_id] = StepResult(
                     step_id=step.step_id,
                     status="insufficient",
@@ -283,6 +290,7 @@ class OperaExecutor:
                 )
             attempt_trace["rewrite"] = rewritten.model_dump()
             query = rewritten.rewritten_query
+            emit("rewrite_accepted", rewritten_query=query, reason=rewritten.reason)
             rewrites += 1
             state.rewrite_count_by_step[step.step_id] = rewrites
             logger.info(
@@ -328,6 +336,8 @@ class OperaExecutor:
         """
 
         selected_top_k = top_k or self._top_k
+        retrieval_id = str(uuid4())
+        emit("retrieval_started", retrieval_id=retrieval_id, query=query, top_k=selected_top_k)
         with self._observability.retriever(
             {
                 "step_id": step_id,
@@ -352,6 +362,8 @@ class OperaExecutor:
                 },
                 metadata={"hybrid_candidate_count": len(result.hybrid)},
             )
+            emit("retrieval_completed", retrieval_id=retrieval_id, query=query,
+                 paragraphs=retrieved_paragraphs, summary=_retrieval_summary(result))
             return result
 
     def _validate_evidence(self, refs: list[EvidenceRef], evidence: list[dict[str, object]]) -> None:
