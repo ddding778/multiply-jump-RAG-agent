@@ -64,7 +64,7 @@ class RetrievalConfigTest(unittest.TestCase):
             collection_name_for_version("tech docs", index_version)
 
     def test_default_opera_debug_trace_and_rewrite_limits_are_loaded(self) -> None:
-        """验证默认 OPERA 配置启用本地轨迹、两次改写和 Langfuse 原文采集。"""
+        """验证默认 OPERA 配置启用本地轨迹、两次改写且不采集 Langfuse 原文。"""
 
         config = load_opera_runtime_config()
 
@@ -73,7 +73,7 @@ class RetrievalConfigTest(unittest.TestCase):
         self.assertEqual("low", config.model_reasoning_effort)
         self.assertTrue(config.debug_trace.enabled)
         self.assertEqual("out/opera-traces", config.debug_trace.output_directory)
-        self.assertTrue(config.langfuse.capture_input_output)
+        self.assertFalse(config.langfuse.capture_input_output)
 
 
 if __name__ == "__main__":

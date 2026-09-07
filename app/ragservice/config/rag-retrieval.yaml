@@ -63,8 +63,8 @@ opera:
     enabled: true
     prompt_label: production
     prompt_cache_ttl_seconds: 300
-    # 调试期间上传问题、query、paragraph 与 Agent 输出到 Langfuse；生产含敏感数据时应改回 false。
-    capture_input_output: true
+    # 默认不上传问题、query、paragraph 与 Agent 输出；仅本地排障时可临时改为 true。
+    capture_input_output: false
     # 三份纯文本 system prompt 在 Langfuse 中的固定名称；通过 python -m opera.prompt_sync 首次同步。
     prompts:
       planner: opera-planner-system

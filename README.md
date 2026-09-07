@@ -1,6 +1,65 @@
-# 第一个学习go-zero的项目
-- 参考了采用了looklook的整体架构，RAG 开发文档见 [docs/develop/rag链路.md](docs/develop/rag链路.md)。
-- 前端页面还没调试，只是ai做的初版前端
+# OPERA-style Multi-Agent Multi-hop RAG
+
+这是一个用于面试展示的 Go / go-zero + Python RAG 项目：重点是基于 HotpotQA 的 OPERA-style 多跳检索闭环，同时保留可独立运行的技术文档 RAG V2、用户认证和旧 Chat 链路。
+
+## 项目展示重点
+
+- **结构化技术文档 RAG V2**：Markdown 按标题层级切分，使用 Dense + BM25 + RRF + MMR 检索，并按相邻标题关系做 P1 上下文扩展。
+- **OPERA-style 多跳 RAG**：Planner 拆解子目标，Hybrid Retriever 给出证据，Analysis-Answer 作答；证据不足时由 Rewrite 改写查询后继续检索。
+- **可观测与安全边界**：运行态与持久化 Memory 分离，Langfuse 用于可选观测，公开演示默认不上传问题、正文或模型输出。
+
+## 输入与输出
+
+| 链路 | 输入 | 输出 |
+| --- | --- | --- |
+| 技术文档 RAG V2 | `docs/**/*.md`、DashScope embedding、Qdrant | 版本化 collection、BM25 artifact、`POST /search` 检索结果 |
+| OPERA 多跳 RAG | 本地 HotpotQA paragraph、问题、Qdrant、DashScope、DeepSeek | `POST /opera/ask` 的最终答案、证据定位、`run_id` 与步骤计数 |
+| 旧 Chat | 已登录用户、会话与消息 | 持久化会话消息与模型回答；可调用技术文档 RAG |
+
+## OPERA 处理流程
+
+```text
+Question
+  -> Planner
+  -> Hybrid Retriever (Dense + BM25 + RRF + MMR)
+  -> Analysis-Answer
+  -> insufficient ? Rewrite -> Retriever : Final answer + evidence
+```
+
+OPERA 运行时只读取 HotpotQA paragraph，不读取 `answer`、`supporting_facts` 等评测标注；技术文档 RAG V2 与 OPERA 使用独立 collection、artifact 和指标，避免混用。
+
+## 快速演示
+
+前置条件：启动 Qdrant，准备未提交的 `.env` 中的 `DASHSCOPE_API_KEY`、`DEEPSEEK_API_KEY`、`OPERA_INDEX_VERSION`。首次使用还需先完成 HotpotQA 离线导入。
+
+```powershell
+docker compose -f .\deploy\rag\docker-compose-qdrant.yaml up -d
+Set-Location .\app\ragservice\embedding-service
+conda run -n aiChatRAG python -m uvicorn main:app --host 127.0.0.1 --port 8082
+```
+
+```powershell
+$body = @{ question = "<your multi-hop question>"; retrieval_scope = "all"; top_k = 3 } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8082/opera/ask -ContentType "application/json" -Body $body
+```
+
+`case` scope 仅用于带 HotpotQA `_id` 的评测；普通演示应使用 `all`。响应含 `run_id`、`status`、`answer`、最终证据的 `chunk_id` / `sentence_index` 及完成步骤数。
+
+## 文档与当前状态
+
+- [RAG 链路与运行合同](docs/develop/rag链路.md)：离线导入、在线接口、配置、评测与排查。
+- [技术选型](docs/develop/技术选型.md)：结构化切分、混合检索、版本化索引等选择理由。
+- [OPERA 前端交接](docs/develop/OPERA前端交接.md)：前端事件合同与联调边界。
+
+已完成 OPERA 的离线导入、独立索引、请求编排、Schema/Pydantic 校验和 mock 测试。正式的 Hybrid 基线与 OPERA-style 双组质量评测尚未实现，因此仓库不宣称已有可比较的答案质量指标。
+
+## 安全与展示边界
+
+- `.env`、本地语料 `docs/hotpotQA/`、`out/` 及本地服务配置不提交；`docs/develop/*.md` 是受版本控制的开发文档。
+- `opera.langfuse.capture_input_output` 默认是 `false`；只有本地且确认数据不敏感时才临时开启原文观测，并在完成后恢复。
+- 当前 HTTP 服务面向本机演示，应监听 `127.0.0.1`，不要直接暴露到公网；任何 API key 均不得传给前端。
+
+## 详细本地运行资料与兼容链路
 
 ## AI RPC 本地启动
 
@@ -112,14 +171,14 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8082/opera/ask -ContentType
 #### 输入
 
 - `.env`：`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`LANGFUSE_BASE_URL`。密钥只保留在本地 `.env`，不要写入 YAML、日志或 Git。
-- 配置：[app/ragservice/config/rag-retrieval.yaml](app/ragservice/config/rag-retrieval.yaml) 的 `opera.langfuse`。当前为 `enabled: true`、读取 `production` 标签、缓存 300 秒、`capture_input_output: true`。
+- 配置：[app/ragservice/config/rag-retrieval.yaml](app/ragservice/config/rag-retrieval.yaml) 的 `opera.langfuse`。当前为 `enabled: true`、读取 `production` 标签、缓存 300 秒、`capture_input_output: false`。
 - 本地 fallback：`app/ragservice/embedding-service/opera/prompts/*.md`。三份内容均是没有变量的 `text` prompt。
 
 #### 输出
 
 - Langfuse prompt：`opera-planner-system`、`opera-analysis-answer-system`、`opera-rewrite-system` 的 `production` 版本；每次同步会创建同名的新版本。
 - Langfuse trace：`opera-ask` 根 Agent，下含 `opera-planner`、`opera-hybrid-retrieval`、`opera-analysis-answer`、按需的 `opera-rewrite`，以及每次 DeepSeek Responses generation。generation 写入 Schema、prompt 来源/版本、`reasoning_effort`、`max_output_tokens`、输入/缓存/输出 token、耗时和成本；Retriever 输出包含实际 paragraph 与候选数/耗时摘要。
-- 隐私：当前调试配置会上传问题、检索 query、paragraph 正文和 Agent 输出到 Langfuse；不会上传 API secret。生产或含敏感数据时，应将 `capture_input_output` 改回 `false`，仅保留字符数、范围、候选数、token 与错误类型。
+- 隐私：默认不向 Langfuse 上传问题、检索 query、paragraph 正文或 Agent 输出，只保留字符数、范围、候选数、token 与错误类型；不会上传 API secret。仅本地且确认数据不敏感的排障场景可临时将 `capture_input_output` 改为 `true`，并在完成后恢复为 `false`。
 
 首次或需要将本地修改发布到 Langfuse 时，显式运行同步命令：
 
@@ -134,7 +193,7 @@ conda run -n aiChatRAG python -m opera.prompt_sync
 
 ### 输入
 
-- 文档：需要切分和索引的 Markdown 应放在项目根目录 `docs/` 下；离线索引器递归匹配 `docs/**/*.md`。`docs/` 是本地语料目录，当前被 Git 忽略；不会索引 `app/` 源码或 `.txt` 文件。
+- 文档：需要切分和索引的 Markdown 应放在项目根目录 `docs/` 下；离线索引器递归匹配 `docs/**/*.md`。仅 `docs/develop/*.md` 作为开发文档提交，HotpotQA 与其他本地语料仍被 Git 忽略；不会索引 `app/` 源码或 `.txt` 文件。
 - HotpotQA：`docs/hotpotQA/*.json` 是本地多跳 RAG 评测数据，不属于 Markdown 技术文档索引输入；后续由独立的 Hotpot 导入链路读取。
 - embedding：项目根目录未提交的 `.env` 中的 `DASHSCOPE_API_KEY`；旧变量名 `ALIYUN_API_KEY` 仅作兼容回退。
 - 在线版本：`.env` 中必须设置 `RAG_INDEX_VERSION`，其值必须是一次成功 embedding 的 manifest 内 `index_version`。

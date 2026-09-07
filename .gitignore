@@ -2,7 +2,10 @@
 app/ai/rpc/etc/ai.yaml
 .env
 .agents/skills/langfuse/
-docs
+# 仅提交面向协作与展示的开发文档；HotpotQA 和其他本地语料保持忽略。
+/docs/*
+!/docs/develop/
+!/docs/develop/*.md
 build
 out/
 logs/

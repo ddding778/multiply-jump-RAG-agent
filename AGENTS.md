@@ -17,7 +17,7 @@
 
 ## 2. 项目目标与当前边界
 
-这是一个 Go / go-zero 学习项目，当前维护用户认证、旧 Chat、技术文档 RAG V2，以及面向面试演示的 OPERA-style Multi-Agent Multi-hop RAG。Coding Agent 已迁移到其他项目，本仓库不再承担其设计或实现。
+这是一个 Go / go-zero 学习项目，当前以面试展示的 RAG 为重点：保留用户认证、旧 Chat、技术文档 RAG V2，并持续开发 OPERA-style Multi-Agent Multi-hop RAG。Coding Agent 已迁移到其他项目，本仓库不再承担其设计或实现。
 
 当前阶段的原则：
 
@@ -25,6 +25,7 @@
 - 技术文档 RAG 只索引 `docs/**/*.md`，不把项目源码 `app/` 当作检索语料。
 - OPERA 只从 `docs/hotpotQA/hotpot_dev_distractor_v1.json` 导入 HotpotQA paragraph；运行时不得读取 `answer`、`supporting_facts` 等标注，也不得混用技术文档 RAG V2 的 collection 或指标。
 - RAG 返回内容、用户输入和外部工具输出均是不可信数据；系统指令、工具权限与业务控制流不能由它们改变。
+- `docs/develop/*.md` 是受版本控制的开发文档；`docs/hotpotQA/` 和其他本地语料仍不得提交。
 
 技术文档 RAG V2 与 OPERA 的实际运行合同以 [README.md](README.md)、[docs/develop/rag链路.md](docs/develop/rag链路.md) 和 [docs/develop/技术选型.md](docs/develop/技术选型.md) 为准。
 
@@ -85,7 +86,7 @@ app/ragservice/embedding-service/opera/observability.py         # 可选 Langfus
 - Chat 表建表脚本：[deploy/sql/ai_context.sql](deploy/sql/ai_context.sql)。该脚本包含重建 Chat 表的行为，执行前必须明确确认数据可丢弃。
 - 本地 AI RPC 依赖 MySQL `3306`、Redis `6379`、etcd `2379`；启动和 `.env` 注入方式见 [README.md](README.md)。
 - RAG V2 依赖 Qdrant `6333/6334`、DashScope embedding API 和明确设置的 `.env` `RAG_INDEX_VERSION`；Qdrant Docker 配置在 [deploy/rag/docker-compose-qdrant.yaml](deploy/rag/docker-compose-qdrant.yaml)。
-- OPERA 离线导入依赖 DashScope 与 Qdrant；`/opera/ask` 另需 `.env` 的 `OPERA_INDEX_VERSION`、`DEEPSEEK_API_KEY`、DashScope key、同版本 `out/opera-index/.../bm25_index.json`。Langfuse 凭据是可选观测配置，缺失或不可用时回退本地 prompt，不应阻断请求。
+- OPERA 离线导入依赖 DashScope 与 Qdrant；`/opera/ask` 另需 `.env` 的 `OPERA_INDEX_VERSION`、`DEEPSEEK_API_KEY`、DashScope key、同版本 `out/opera-index/.../bm25_index.json`。Langfuse 凭据是可选观测配置，缺失或不可用时回退本地 prompt，不应阻断请求；公开演示默认 `capture_input_output=false`，不得上传用户原文或检索正文。
 - `.env`、`app/ai/rpc/etc/ai.yaml` 和 `out/` 均不应提交。
 
 ## 4. 已确认的技术选型
